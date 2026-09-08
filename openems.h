@@ -32,6 +32,25 @@
 #define OPENEMS_STAT_FILE "openEMS_stats.txt"
 #define OPENEMS_RUN_STAT_FILE "openEMS_run_stats.txt"
 
+//! Default number of timesteps between two evaluations of the end-criteria.
+//! Measured cost, at one thread on three beds (a 41^3 and a 61^3 cell air box
+//! and a shielded microstrip line): 0.7 to 1.3 timesteps per evaluation on this
+//! build, so this default costs about 1% of the run time. An earlier
+//! instrumented build that timed the parts separately put the same three beds
+//! at 1.3 to 1.4, so treat 1 to 1.4% as the range. Most of that is not the
+//! energy estimate itself (0.2 to 0.3 timesteps on that instrumented build)
+//! but the extra IterateTS call that clamping the loop to the next evaluation
+//! forces. The share is expected
+//! to be worse where threads speed the update up, because the energy estimate
+//! is a serial scalar pass over every cell while the update is SSE and
+//! multi-threaded -- that is read off the code, not measured, since the machine
+//! these numbers come from gave no thread speedup at all.
+//! It has to be a number of timesteps and not a wall-clock period: sampling the
+//! end-criteria on a wall-clock period makes the number of simulated timesteps
+//! -- and with it the frequency resolution of every result -- depend on the
+//! speed of the host.
+#define OPENEMS_DEFAULT_ENDCRIT_CHECK_INTERVAL 100
+
 class Operator;
 class Engine;
 class Engine_Interface_FDTD;
@@ -63,7 +82,10 @@ public:
 
 	void SetNumberOfTimeSteps(unsigned int val) {NrTS=val;}
 	void SetEnableDumps(bool val) {Enable_Dumps=val;}
-	void SetEndCriteria(double val) {endCrit=val;}
+	//! Set the end-criteria: the energy decay at which the simulation stops (has to be <1)
+	void SetEndCriteria(double val);
+	//! Set the number of timesteps between two evaluations of the end-criteria (has to be >0)
+	void SetEndCriteriaCheckInterval(unsigned int val);
 	void SetOverSampling(int val) {m_OverSampling=val;}
 	void SetCellConstantMaterial(bool val) {m_CellConstantMaterial=val;}
 
@@ -75,6 +97,8 @@ public:
 	void SetTimeStep(double val) {m_TS=val;}
 	void SetTimeStepFactor(double val) {m_TS_fac=val;}
 	void SetMaxTime(double val) {m_maxTime=val;}
+	//! Set the max. wall-clock run time of the FDTD loop in seconds (0 to disable)
+	void SetMaxRunTime(double val) {m_maxRunTime=val;}
 
 	// used by Python binding when running as a shared library
 	void SetLibraryArguments(std::vector<std::string> allOptions);
@@ -103,6 +127,23 @@ public:
 	void SetAbort(bool val) {m_Abort=val;}
 	//! Check for abort conditions
 	bool CheckAbortCond();
+	//! Check whether the max. wall-clock run time has been exceeded
+	bool CheckRunTimeLimit(double t_run) const;
+
+	//! Reason the FDTD iteration loop was left
+	enum TerminationReason
+	{
+		Terminated_NotRun,       //!< RunFDTD has not been run (yet)
+		Terminated_Converged,    //!< the end-criteria was reached
+		Terminated_MaxTimesteps, //!< the max. number of timesteps was reached
+		Terminated_MaxRunTime,   //!< the max. wall-clock run time was reached
+		Terminated_Aborted       //!< aborted by SIGINT, an "ABORT" file or SetAbort()
+	};
+
+	//! Get the reason the last FDTD run was terminated
+	TerminationReason GetTerminationReason() const {return m_TerminationReason;}
+	//! Get the reason the last FDTD run was terminated as a short, stable keyword
+	std::string GetTerminationReasonString() const;
 
 	void SetGaussExcite(double f0, double fc);
 	void SetSinusExcite(double f0);
@@ -140,6 +181,7 @@ protected:
 	double m_TS;
 	double m_TS_fac;
 	double m_maxTime;
+	double m_maxRunTime;
 
 	// some command line flags
 	bool Enable_Dumps;
@@ -150,6 +192,7 @@ protected:
 	bool m_debugBox, m_debugPEC, m_no_simulation;
 
 	double endCrit;
+	unsigned int m_endCritCheckInterval;
 	int m_OverSampling;
 	bool m_CellConstantMaterial;
 	Operator* FDTD_Op;
@@ -160,6 +203,7 @@ protected:
 	Excitation* m_Exc;
 
 	bool m_Abort;
+	TerminationReason m_TerminationReason;
 
 #ifdef MPI_SUPPORT
 	enum EngineType {EngineType_Basic, EngineType_SSE, EngineType_SSE_Compressed, EngineType_Multithreaded, EngineType_MPI};

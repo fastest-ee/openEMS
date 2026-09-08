@@ -16,7 +16,11 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import os
+import tempfile
 import unittest
+import xml.etree.ElementTree as ET
+
 import numpy as np
 
 from CSXCAD import ContinuousStructure
@@ -48,6 +52,14 @@ class Test_Constructor(unittest.TestCase):
 
     def test_max_time(self):
         fdtd = openEMS(MaxTime=1e-9)
+        self.assertIsNotNone(fdtd)
+
+    def test_max_run_time(self):
+        fdtd = openEMS(MaxRunTime=60)
+        self.assertIsNotNone(fdtd)
+
+    def test_end_criteria_check_interval(self):
+        fdtd = openEMS(EndCriteriaCheckInterval=50)
         self.assertIsNotNone(fdtd)
 
     def test_oversampling(self):
@@ -85,6 +97,81 @@ class Test_Constructor(unittest.TestCase):
     def test_multiple_kwargs(self):
         fdtd = openEMS(NrTS=5e4, EndCriteria=1e-5, TimeStepFactor=0.95)
         self.assertIsNotNone(fdtd)
+
+
+class Test_TerminationReason(unittest.TestCase):
+    def test_fresh_object_has_not_run(self):
+        fdtd = openEMS()
+        self.assertEqual(fdtd.GetTerminationReason(), 0)
+        self.assertEqual(fdtd.GetTerminationReasonString(), 'not_run')
+
+    def test_reason_string_is_str(self):
+        self.assertIsInstance(openEMS().GetTerminationReasonString(), str)
+
+
+class Test_EndCriteriaCheckInterval(unittest.TestCase):
+    def setUp(self):
+        self.fdtd = openEMS()
+        self.fdtd.SetGaussExcite(f0=1e9, fc=500e6)
+        self.fdtd.SetCSX(_make_csx_with_grid())
+        self.fn = os.path.join(tempfile.gettempdir(), 'test_openEMS_interval.xml')
+
+    def tearDown(self):
+        if os.path.exists(self.fn):
+            os.remove(self.fn)
+
+    def _interval(self):
+        self.fdtd.Write2XML(self.fn)
+        el = ET.parse(self.fn).getroot().find('FDTD')
+        return int(el.get('EndCriteriaCheckInterval'))
+
+    def test_valid(self):
+        self.fdtd.SetEndCriteriaCheckInterval(1)
+        self.assertEqual(self._interval(), 1)
+        self.fdtd.SetEndCriteriaCheckInterval(10000)
+        self.assertEqual(self._interval(), 10000)
+
+    def test_zero_is_rejected_and_keeps_previous_value(self):
+        # a zero interval would mean "never evaluate the end criteria", so the
+        # setter refuses it rather than disabling the end criteria silently
+        self.fdtd.SetEndCriteriaCheckInterval(77)
+        self.fdtd.SetEndCriteriaCheckInterval(0)
+        self.assertEqual(self._interval(), 77)
+
+
+class Test_EndCriteria(unittest.TestCase):
+    def setUp(self):
+        self.fdtd = openEMS()
+        self.fdtd.SetGaussExcite(f0=1e9, fc=500e6)
+        self.fdtd.SetCSX(_make_csx_with_grid())
+        self.fn = os.path.join(tempfile.gettempdir(), 'test_openEMS_endcrit.xml')
+
+    def tearDown(self):
+        if os.path.exists(self.fn):
+            os.remove(self.fn)
+
+    def _criteria(self):
+        self.fdtd.Write2XML(self.fn)
+        el = ET.parse(self.fn).getroot().find('FDTD')
+        # the attribute is written with %f, so only values that survive six
+        # decimal places can be read back this way
+        return float(el.get('endCriteria'))
+
+    def test_valid(self):
+        self.fdtd.SetEndCriteria(0.001)
+        self.assertAlmostEqual(self._criteria(), 0.001)
+        self.fdtd.SetEndCriteria(0.25)
+        self.assertAlmostEqual(self._criteria(), 0.25)
+
+    def test_one_or_more_is_rejected_and_keeps_previous_value(self):
+        # the criteria is a ratio to the largest energy estimate seen so far,
+        # which starts at 1, so >=1 is met before a single timestep has been
+        # simulated: the run would stop at timestep 0 and call itself converged
+        self.fdtd.SetEndCriteria(0.001)
+        for bad in (1.0, 2.5, 100.0):
+            with self.subTest(EndCriteria=bad):
+                self.fdtd.SetEndCriteria(bad)
+                self.assertAlmostEqual(self._criteria(), 0.001)
 
 
 class Test_CoordSystem(unittest.TestCase):

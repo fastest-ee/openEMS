@@ -291,5 +291,51 @@ class Test_XML_RoundTrip(unittest.TestCase):
         self.assertEqual(int(fdtd_el.get('CylinderCoords')), 1)
 
 
+class Test_TerminationCriteria_XML(unittest.TestCase):
+    """The end-criteria check interval and the wall-clock run time limit have to
+    survive the XML path, like every other FDTD setup value."""
+
+    def setUp(self):
+        self.fn1 = os.path.join(tempfile.gettempdir(), 'test_openEMS_term1.xml')
+        self.fn2 = os.path.join(tempfile.gettempdir(), 'test_openEMS_term2.xml')
+
+    def tearDown(self):
+        for fn in (self.fn1, self.fn2):
+            if os.path.exists(fn):
+                os.remove(fn)
+
+    def _fdtd(self):
+        fdtd = _make_fdtd()
+        fdtd.SetEndCriteriaCheckInterval(37)
+        fdtd.SetMaxRunTime(123.5)
+        return fdtd
+
+    def test_written(self):
+        self._fdtd().Write2XML(self.fn1)
+        el = ET.parse(self.fn1).getroot().find('FDTD')
+        self.assertEqual(int(el.get('EndCriteriaCheckInterval')), 37)
+        self.assertAlmostEqual(float(el.get('MaxRunTime')), 123.5)
+
+    def test_roundtrip(self):
+        self._fdtd().Write2XML(self.fn1)
+        fdtd2 = openEMS()
+        fdtd2.ReadFromXML(self.fn1)
+        fdtd2.Write2XML(self.fn2)
+
+        el = ET.parse(self.fn2).getroot().find('FDTD')
+        self.assertEqual(int(el.get('EndCriteriaCheckInterval')), 37)
+        self.assertAlmostEqual(float(el.get('MaxRunTime')), 123.5)
+
+    def test_default_interval_written(self):
+        _make_fdtd().Write2XML(self.fn1)
+        el = ET.parse(self.fn1).getroot().find('FDTD')
+        self.assertGreater(int(el.get('EndCriteriaCheckInterval')), 0)
+
+    def test_no_run_time_limit_by_default(self):
+        _make_fdtd().Write2XML(self.fn1)
+        el = ET.parse(self.fn1).getroot().find('FDTD')
+        self.assertIsNone(el.get('MaxRunTime'))
+
+
 if __name__ == '__main__':
     unittest.main()

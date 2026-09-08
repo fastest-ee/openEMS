@@ -32,6 +32,7 @@ cdef extern from "openEMS/openems.h":
         _ContinuousStructure* GetCSX()
 
         void SetEndCriteria(double val)
+        void SetEndCriteriaCheckInterval(unsigned int val)
         void SetOverSampling(int val)
         void SetCellConstantMaterial(bool val)
 
@@ -42,6 +43,7 @@ cdef extern from "openEMS/openems.h":
         void SetTimeStep(double val)
         void SetTimeStepFactor(double val)
         void SetMaxTime(double val)
+        void SetMaxRunTime(double val)
 
         void SetLibraryArguments(vector[string] allOptions) except +
 
@@ -58,6 +60,11 @@ cdef extern from "openEMS/openems.h":
         void SetCustomExcite(string _str, double f0, double fmax)
 
         void SetAbort(bool val)
+
+        # openEMS::TerminationReason, declared as int so the enum does not have
+        # to be duplicated here; GetTerminationReasonString gives the keyword
+        int GetTerminationReason()
+        string GetTerminationReasonString()
 
         int SetupFDTD() nogil
         void RunFDTD()  nogil

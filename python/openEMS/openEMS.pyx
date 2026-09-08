@@ -55,7 +55,9 @@ cdef class openEMS:
 
     :param NrTS:           max. number of timesteps to simulate (e.g. default=1e9)
     :param EndCriteria:    end criteria, e.g. 1e-5, simulations stops if energy has decayed by this value (<1e-4 is recommended, default=1e-5)
-    :param MaxTime:        max. real time in seconds to simulate
+    :param EndCriteriaCheckInterval: number of timesteps between two evaluations of the end criteria (default=100)
+    :param MaxTime:        max. simulated time in seconds
+    :param MaxRunTime:     max. wall-clock run time of the FDTD loop in seconds, 0 to disable (default=0)
     :param OverSampling:   nyquist oversampling of time domain dumps
     :param CoordSystem:    choose coordinate system (0 Cartesian, 1 Cylindrical)
     :param MultiGrid:      define a cylindrical sub-grid radius
@@ -83,9 +85,15 @@ cdef class openEMS:
         if 'EndCriteria' in kw:
             self.SetEndCriteria(kw['EndCriteria'])
             del kw['EndCriteria']
+        if 'EndCriteriaCheckInterval' in kw:
+            self.SetEndCriteriaCheckInterval(kw['EndCriteriaCheckInterval'])
+            del kw['EndCriteriaCheckInterval']
         if 'MaxTime' in kw:
             self.SetMaxTime(kw['MaxTime'])
             del kw['MaxTime']
+        if 'MaxRunTime' in kw:
+            self.SetMaxRunTime(kw['MaxRunTime'])
+            del kw['MaxRunTime']
         if 'OverSampling' in kw:
             self.SetOverSampling(kw['OverSampling'])
             del kw['OverSampling']
@@ -130,8 +138,36 @@ cdef class openEMS:
         """ SetEndCriteria(val)
 
         Set the end criteria value. E.g. 1e-6 for -60dB
+
+        The criteria is a ratio of the current energy estimate to the largest one
+        seen so far, which starts at 1, so it has to be <1: a value of 1 or more
+        is already met before a single timestep has been simulated and is refused.
         """
         self.thisptr.SetEndCriteria(val)
+
+    def SetEndCriteriaCheckInterval(self, val):
+        """ SetEndCriteriaCheckInterval(val)
+
+        Set the number of timesteps between two evaluations of the end criteria
+        (default 100, has to be >0).
+
+        The end criteria is evaluated every val timesteps and not on a wall-clock
+        period, so that a simulation stops after the same number of timesteps --
+        and therefore with the same frequency resolution -- no matter how fast the
+        machine is. A smaller value stops closer to the end criteria at the cost of
+        more evaluations. Measured at one thread on three beds (a 41^3 and a 61^3
+        cell air box and a shielded microstrip line), one evaluation costs 0.7 to
+        1.3 timesteps of the same run, so the default of 100 costs about 1% of the
+        run time and a value of 10 costs about 10%. An earlier instrumented build
+        put the same three beds at 1.3 to 1.4, so treat 1 to 1.4% as the range.
+
+        Only the serial FDTD loop evaluates the end criteria on this cadence. An
+        MPI run with more than one rank has its own loop, which still evaluates the
+        end criteria on a four second wall-clock period and never reads this value.
+        The value is still accepted, stored and written to the XML there, and no
+        warning is given, so setting it under MPI simply does nothing.
+        """
+        self.thisptr.SetEndCriteriaCheckInterval(val)
 
     def SetOverSampling(self, val):
         """ SetOverSampling(val)
@@ -240,6 +276,21 @@ cdef class openEMS:
         Set max simulation time for a max. number of timesteps.
         """
         self.thisptr.SetMaxTime(val)
+
+    def SetMaxRunTime(self, val):
+        """ SetMaxRunTime(val)
+
+        Set the max. wall-clock run time of the FDTD loop in seconds, 0 to disable
+        (default). Unlike SetMaxTime, which limits the simulated time, this limits
+        how long the simulation is allowed to run for. A run stopped by this limit
+        reports "max_run_time" from GetTerminationReasonString().
+
+        Only the serial FDTD loop enforces this limit. An MPI run with more than
+        one rank has its own loop, which never checks it. The value is still
+        accepted, stored and written to the XML there, and no warning is given, so
+        setting it under MPI simply does nothing.
+        """
+        self.thisptr.SetMaxRunTime(val)
 
     def SetGaussExcite(self, f0, fc):
         """ SetGaussExcite(f0, fc)
@@ -678,6 +729,27 @@ cdef class openEMS:
 
     def SetAbort(self, val):
         self.thisptr.SetAbort(val)
+
+    def GetTerminationReason(self):
+        """ GetTerminationReason()
+
+        Get the reason the last Run() was terminated, as an integer code:
+        0 (not run), 1 (converged), 2 (max. timesteps), 3 (max. run time),
+        4 (aborted). See GetTerminationReasonString() for the keyword form.
+        """
+        return self.thisptr.GetTerminationReason()
+
+    def GetTerminationReasonString(self):
+        """ GetTerminationReasonString()
+
+        Get the reason the last Run() was terminated, as one of the keywords
+        "not_run", "converged", "max_timesteps", "max_run_time" or "aborted".
+
+        Only "converged" means the end criteria was reached. The other results
+        were cut short, and their frequency resolution and accuracy are whatever
+        the run got to before it was stopped.
+        """
+        return self.thisptr.GetTerminationReasonString().decode('UTF-8')
 
     def Write2XML(self, file):
         """ Write2XML(file)

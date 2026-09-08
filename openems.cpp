@@ -115,12 +115,15 @@ void openEMS::Reset()
 	m_CC_MultiGrid.clear();
 	m_CellConstantMaterial=false;
 	endCrit = 1e-6;
+	m_endCritCheckInterval = OPENEMS_DEFAULT_ENDCRIT_CHECK_INTERVAL;
 	m_OverSampling = 4;
 
 	m_TS_method=3;
 	m_TS=0;
 	m_TS_fac=1.0;
 	m_maxTime=0.0;
+	m_maxRunTime=0.0;
+	m_TerminationReason=Terminated_NotRun;
 
 	for (int n=0;n<6;++n)
 	{
@@ -865,11 +868,21 @@ bool openEMS::Parse_XML_FDTDSetup(TiXmlElement* FDTD_Opts)
 		this->SetMaxTime(dhelp);
 
 	dhelp = 0;
+	FDTD_Opts->QueryDoubleAttribute("MaxRunTime",&dhelp);
+	if (dhelp>0)
+		this->SetMaxRunTime(dhelp);
+
+	dhelp = 0;
 	FDTD_Opts->QueryDoubleAttribute("endCriteria",&dhelp);
 	if (dhelp==0)
 		this->SetEndCriteria(1e-6);
 	else
 		this->SetEndCriteria(dhelp);
+
+	ihelp = 0;
+	FDTD_Opts->QueryIntAttribute("EndCriteriaCheckInterval",&ihelp);
+	if (ihelp>0)
+		this->SetEndCriteriaCheckInterval((unsigned int)ihelp);
 
 	ihelp = 0;
 	FDTD_Opts->QueryIntAttribute("OverSampling",&ihelp);
@@ -998,7 +1011,10 @@ bool openEMS::Write2XML(TiXmlNode* rootNode)
 	}
 	if (this->m_maxTime>0)
 		fdtd.SetDoubleAttribute("MaxTime", this->m_maxTime);
+	if (this->m_maxRunTime>0)
+		fdtd.SetDoubleAttribute("MaxRunTime", this->m_maxRunTime);
 	fdtd.SetDoubleAttribute("endCriteria", this->endCrit);
+	fdtd.SetAttribute("EndCriteriaCheckInterval", (int)this->m_endCritCheckInterval);
 	fdtd.SetAttribute("OverSampling", this->m_OverSampling);
 	if (this->m_CellConstantMaterial)
 		fdtd.SetAttribute("CellConstantMaterial", this->m_CellConstantMaterial);
@@ -1389,6 +1405,59 @@ bool openEMS::CheckAbortCond()
 	return false;
 }
 
+void openEMS::SetEndCriteria(double val)
+{
+	//The end-criteria is the ratio of the current energy estimate to the largest
+	//one seen so far, which starts at 1. A criteria of 1 or more is therefore
+	//already met before a single timestep has been simulated: the run would stop
+	//at timestep 0 and report itself converged having simulated nothing.
+	if (val>=1)
+	{
+		cerr << "openEMS::SetEndCriteria: Error, the end-criteria has to be <1, ignoring..." << endl;
+		return;
+	}
+	endCrit = val;
+}
+
+void openEMS::SetEndCriteriaCheckInterval(unsigned int val)
+{
+	if (val==0)
+	{
+		cerr << "openEMS::SetEndCriteriaCheckInterval: Error, the interval has to be >0, ignoring..." << endl;
+		return;
+	}
+	m_endCritCheckInterval = val;
+}
+
+bool openEMS::CheckRunTimeLimit(double t_run) const
+{
+	if (m_maxRunTime<=0) //no run time limit requested
+		return false;
+	if (t_run<m_maxRunTime)
+		return false;
+
+	cerr << "openEMS::CheckRunTimeLimit: Max. run time of " << m_maxRunTime << "s exceeded, stopping simulation..." << endl;
+	return true;
+}
+
+string openEMS::GetTerminationReasonString() const
+{
+	switch (m_TerminationReason)
+	{
+	case Terminated_NotRun:
+		return "not_run";
+	case Terminated_Converged:
+		return "converged";
+	case Terminated_MaxTimesteps:
+		return "max_timesteps";
+	case Terminated_MaxRunTime:
+		return "max_run_time";
+	case Terminated_Aborted:
+		return "aborted";
+	}
+	return "unknown";
+}
+
 void openEMS::RunFDTD()
 {
 	cout << "Running FDTD engine... this may take a while... grab a cup of coffee?!?" << endl;
@@ -1409,10 +1478,14 @@ void openEMS::RunFDTD()
 
 	double change=1;
 	int prevTS=0,currTS=0;
+	//timestep at which the end-criteria is evaluated next, never past the last timestep
+	int nextCheckTS = (int)FDTD_Eng->GetNumberOfTimesteps() + (int)m_endCritCheckInterval;
+	if (nextCheckTS>(int)NrTS) nextCheckTS = (int)NrTS;
+	bool runTimeExceeded = false;
 	double numCells = FDTD_Op->GetNumberCells();
 	double speed = 0;
 	double t_diff;
-	double t_run;
+	double t_run = 0;
 
 	timeval currTime;
 	gettimeofday(&currTime,NULL);
@@ -1426,7 +1499,12 @@ void openEMS::RunFDTD()
 	PA->PreProcess();
 	int step=PA->Process();
 	if ((step<0) || (step>(int)NrTS)) step=NrTS;
-	while ((FDTD_Eng->GetNumberOfTimesteps()<NrTS) && (change>endCrit) && !CheckAbortCond())
+	//do not iterate past the first evaluation of the end-criteria either: this
+	//first chunk sets the phase of the whole cadence, so leaving it unclamped
+	//offsets every later evaluation by its remainder
+	if (step>(nextCheckTS - (int)FDTD_Eng->GetNumberOfTimesteps()))
+		step = nextCheckTS - (int)FDTD_Eng->GetNumberOfTimesteps();
+	while ((FDTD_Eng->GetNumberOfTimesteps()<NrTS) && (change>endCrit) && !runTimeExceeded && !CheckAbortCond())
 	{
 		FDTD_Eng->IterateTS(step);
 		step=PA->Process();
@@ -1441,16 +1519,13 @@ void openEMS::RunFDTD()
 		currTS = FDTD_Eng->GetNumberOfTimesteps();
 		if ((step<0) || (step>(int)(NrTS - currTS))) step=NrTS - currTS;
 
-		gettimeofday(&currTime,NULL);
-
-		t_diff = CalcDiffTime(currTime,prevTime);
-
-		if (t_diff>4)
+		//Evaluate the end-criteria on a fixed number of timesteps. Evaluating it on
+		//a wall-clock period instead lets a faster host run further past the
+		//criteria between two evaluations, which makes the number of simulated
+		//timesteps -- and with it the frequency resolution of every result --
+		//depend on the speed of the host.
+		if (currTS>=nextCheckTS)
 		{
-			t_run = CalcDiffTime(currTime,startTime);
-			speed = numCells*(currTS-prevTS)/t_diff;
-			cout << "[@" <<  FormatTime(t_run) <<  "] Timestep: " << setw(12)  << currTS ;
-			cout << " || Speed: " << setw(6) << setprecision(1) << std::fixed << speed*1e-6 << " MC/s (" <<  setw(4) << setprecision(3) << std::scientific << t_diff/(currTS-prevTS) << " s/TS)" ;
 			if (Eng_Ext_SSD==NULL)
 			{
 				currE = ProcField->CalcTotalEnergyEstimate();
@@ -1458,13 +1533,33 @@ void openEMS::RunFDTD()
 					maxE=currE;
 				if (maxE)
 					change = currE/maxE;
-				cout << " || Energy: ~" << setw(6) << setprecision(2) << std::scientific << currE << " (-" << setw(5)  << setprecision(2) << std::fixed << fabs(10.0*log10(change)) << "dB)" << endl;
 			}
 			else
-			{
 				change = Eng_Ext_SSD->GetLastDiff();
+
+			//never schedule an evaluation past the last timestep
+			if (m_endCritCheckInterval < NrTS - (unsigned int)currTS)
+				nextCheckTS = currTS + (int)m_endCritCheckInterval;
+			else
+				nextCheckTS = (int)NrTS;
+		}
+		//do not iterate past the next evaluation of the end-criteria
+		if (step>(nextCheckTS - currTS)) step = nextCheckTS - currTS;
+
+		gettimeofday(&currTime,NULL);
+
+		t_run = CalcDiffTime(currTime,startTime);
+		t_diff = CalcDiffTime(currTime,prevTime);
+
+		if (t_diff>4)
+		{
+			speed = numCells*(currTS-prevTS)/t_diff;
+			cout << "[@" <<  FormatTime(t_run) <<  "] Timestep: " << setw(12)  << currTS ;
+			cout << " || Speed: " << setw(6) << setprecision(1) << std::fixed << speed*1e-6 << " MC/s (" <<  setw(4) << setprecision(3) << std::scientific << t_diff/(currTS-prevTS) << " s/TS)" ;
+			if (Eng_Ext_SSD==NULL)
+				cout << " || Energy: ~" << setw(6) << setprecision(2) << std::scientific << currE << " (-" << setw(5)  << setprecision(2) << std::fixed << fabs(10.0*log10(change)) << "dB)" << endl;
+			else
 				cout << " || SteadyState: " << setw(6) << setprecision(2) << std::fixed << 10.0*log10(change) << " dB" << endl;
-			}
 			prevTime=currTime;
 			prevTS=currTS;
 
@@ -1474,8 +1569,25 @@ void openEMS::RunFDTD()
 				DumpRunStatistics(OPENEMS_RUN_STAT_FILE, t_run, currTS, speed, currE);
 			FDTD_Eng->NextInterval(speed);
 		}
+
+		runTimeExceeded = CheckRunTimeLimit(t_run);
 	}
-	if ((change>endCrit) && (FDTD_Op->GetExcitationSignal()->GetExciteType()==0))
+	//Record why the loop was left. The end-criteria is tested first: a run whose
+	//last evaluation of the end-criteria falls on the very timestep the max. number
+	//of timesteps is reached did converge, and convergence is the meaningful
+	//reason to report for it. change is only ever assigned by an evaluation of
+	//the end-criteria, so change<=endCrit cannot hold for a run that never
+	//reached one (it starts at 1).
+	if (change<=endCrit)
+		m_TerminationReason = Terminated_Converged;
+	else if (FDTD_Eng->GetNumberOfTimesteps()>=NrTS)
+		m_TerminationReason = Terminated_MaxTimesteps;
+	else if (runTimeExceeded)
+		m_TerminationReason = Terminated_MaxRunTime;
+	else
+		m_TerminationReason = Terminated_Aborted;
+
+	if ((m_TerminationReason==Terminated_MaxTimesteps) && (FDTD_Op->GetExcitationSignal()->GetExciteType()==0))
 		cerr << "RunFDTD: Warning: Max. number of timesteps was reached before the end-criteria of -" << fabs(10.0*log10(endCrit)) << "dB was reached... " << endl << \
 				"\tYou may want to choose a higher number of max. timesteps... " << endl;
 
@@ -1484,6 +1596,7 @@ void openEMS::RunFDTD()
 
 	cout << "Time for " << FDTD_Eng->GetNumberOfTimesteps() << " iterations with " << FDTD_Op->GetNumberCells() << " cells : " << t_diff << " sec" << endl;
 	cout << "Speed: " << numCells*(double)FDTD_Eng->GetNumberOfTimesteps()/t_diff*1e-6 << " MCells/s " << endl;
+	cout << "Simulation terminated: " << GetTerminationReasonString() << endl;
 
 	if (m_DumpStats)
 		DumpStatistics(OPENEMS_STAT_FILE, t_diff);
@@ -1511,6 +1624,7 @@ bool openEMS::DumpStatistics(const string& filename, double time)
 	stat_file << FDTD_Eng->GetNumberOfTimesteps()*FDTD_Op->GetTimestep() << "\t% total numerical time (s)" << endl;
 	stat_file << time << "\t% simulation time (s)" << endl;
 	stat_file << (double)FDTD_Op->GetNumberCells()*(double)FDTD_Eng->GetNumberOfTimesteps()/time << "\t% speed (cells/s)" << endl;
+	stat_file << (int)m_TerminationReason << "\t% termination reason (0=not run, 1=converged, 2=max. timesteps, 3=max. run time, 4=aborted)" << endl;
 
 	stat_file.close();
 	return true;

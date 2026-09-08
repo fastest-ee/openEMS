@@ -6,8 +6,17 @@ function FDTD = InitFDTD(varargin)
 % optional field arguments for usage with openEMS:
 % - NrTS:           max. number of timesteps to simulate (e.g. default=1e9)
 % - EndCriteria:    end criteria, e.g. 1e-5, simulations stops if energy has
-%                   decayed by this value (<1e-4 is recommended, default=1e-5)
-% - MaxTime:        max. real time in seconds to simulate
+%                   decayed by this value (has to be <1; <1e-4 is recommended,
+%                   default=1e-5)
+% - EndCriteriaCheckInterval: number of timesteps between two evaluations of
+%                   the end criteria (default=100). Serial runs only: an MPI
+%                   run with more than one rank has its own loop, which never
+%                   reads this value and gives no warning.
+% - MaxTime:        max. simulated time in seconds
+% - MaxRunTime:     max. wall-clock run time of the FDTD loop in seconds,
+%                   0 to disable (default=0). Serial runs only: an MPI run
+%                   with more than one rank never checks it and gives no
+%                   warning.
 % - OverSampling:   nyquist oversampling of time domain dumps
 % - CoordSystem:    choose coordinate system (0 Cartesian, 1 Cylindrical)
 % - MultiGrid:      define a cylindrical sub-grid radius

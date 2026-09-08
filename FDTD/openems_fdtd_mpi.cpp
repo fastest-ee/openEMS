@@ -522,6 +522,31 @@ void openEMS_FDTD_MPI::RunFDTD()
 			PA->FlushNext();
 		}
 	}
+	//Record why the loop was left, mirroring the classifier in openEMS::RunFDTD().
+	//Without this the reason keeps the Terminated_NotRun it was constructed with,
+	//and DumpStatistics() below writes "not run" to openEMS_stats.txt for a run
+	//that ran.
+	//This is a plain local assignment on every rank. It reads only values this loop
+	//already keeps in step across the ranks -- m_EnergyDecrement is broadcast by
+	//CalcEnergy(), the timestep count follows the step broadcast by GetNextStep()
+	//-- so every rank classifies the same way without communicating. It is not a
+	//collective and must not become one: a rank that entered MPI here while
+	//another had left the loop would deadlock.
+	//The end-criteria is tested first, for the same reason as in the serial
+	//classifier: a run whose energy falls below the criteria on the very timestep
+	//the max. number of timesteps is reached did converge, and convergence is the
+	//meaningful reason to report for it. The test is this loop's own '<' rather
+	//than the serial classifier's '<=' so that the reason reports what this loop
+	//actually decided to stop on.
+	//Terminated_MaxRunTime cannot be reached here: CheckRunTimeLimit() is only
+	//evaluated in openEMS::RunFDTD(), so SetMaxRunTime() is inert under MPI.
+	if (m_EnergyDecrement<endCrit)
+		m_TerminationReason = Terminated_Converged;
+	else if (FDTD_Eng->GetNumberOfTimesteps()>=NrTS)
+		m_TerminationReason = Terminated_MaxTimesteps;
+	else
+		m_TerminationReason = Terminated_Aborted;
+
 	if ((m_MyID==0) && (m_EnergyDecrement>endCrit) && (FDTD_Op->GetExcitationSignal()->GetExciteType()==0))
 		cerr << "RunFDTD: max. number of timesteps was reached before the end-criteria of -" << fabs(10.0*log10(endCrit)) << "dB was reached... " << endl << \
 				"\tYou may want to choose a higher number of max. timesteps... " << endl;
